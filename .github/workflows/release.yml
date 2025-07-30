@@ -3,40 +3,109 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Release tag'
-        required: true
+      version:
+        description: 'Version to build'
+        required: false
         default: ''
+  schedule:
+    - cron: '0 20 * * *'
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      build: ${{ steps.check-build.outputs.build }}
+    steps:
+      - name: Check Version
+        id: get-version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          else
+            version=$(curl -s 'https://api.github.com/repos/dragonflyoss/nydus/releases/latest' | jq -r ".tag_name")
+          fi
+          echo "Current Version: ${version}"
+          if [ -z "${version}" ] || [ "${version}" == "null" ]; then
+            echo "Failed to get version"
+            exit 1
+          fi
+          echo "version=${version}" >> $GITHUB_ENV
+          echo "version=${version}" >> $GITHUB_OUTPUT
+
+      - name: Check Build
+        id: check-build
+        run: |
+          gh release view ${version} -R ${{ github.repository }} >/dev/null 2>&1 || echo "build=1" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   nydus-linux:
     runs-on: ubuntu-latest
+    needs: check
+    if: needs.check.outputs.build == '1'
     strategy:
       matrix:
         arch: [loong64]
+    env:
+      version: ${{ needs.check.outputs.version }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
         repository: dragonflyoss/nydus
-        ref: ${{ github.event.inputs.tag }}
+        ref: ${{ env.version }}
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - uses: dsherret/rust-toolchain-file@v1
-    - name: Build nydus-rs
+    - name: Read Rust toolchain version
+      id: set_toolchain_version
       run: |
-        sed -i 's@0.10.55@0.10@g' Cargo.toml
-        declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu" ["loong64"]="loongarch64-unknown-linux-gnu" )
+        RUST_TOOLCHAIN_VERSION=$(grep -oP '(?<=channel = ")[^"]*' rust-toolchain.toml)
+        echo "Rust toolchain version: $RUST_TOOLCHAIN_VERSION"
+        echo "rust-version=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_OUTPUT
+        sed -i 's@FROM ubuntu:latest@FROM debian:trixie@g' .github/workflows/Dockerfile.cross
+        sed -i 's@riscv64gc@loongarch64@g' .github/workflows/Dockerfile.cross
+        sed -i 's@riscv64@loongarch64@g' .github/workflows/Dockerfile.cross
+        sed -i 's@software-properties-common@# software-properties-common@g' .github/workflows/Dockerfile.cross
+        sed -i 's@RUN add-apt-repository@RUN echo add-apt-repository@g' .github/workflows/Dockerfile.cross
+
+      shell: bash
+    - name: Set up Docker Buildx
+      if: matrix.arch == 'loong64'
+      uses: docker/setup-buildx-action@v3
+    - name: Build and push Docker image
+      if: matrix.arch == 'loong64'
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./.github/workflows/Dockerfile.cross
+        push: false
+        load: true
+        tags: rust-cross-compile-loong64:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          RUST_VERSION=${{ steps.set_toolchain_version.outputs.rust-version }}
+    - name : Build Nydus-rs LoongArch
+      if: matrix.arch == 'loong64'
+      run: |
+        RUST_TARGET=loongarch64-unknown-linux-gnu
+        echo '[patch.crates-io]' >> Cargo.toml
+        echo 'nix = { git = "https://github.com/loong64/nix", branch = "loong64-v0.24.0" }' >> Cargo.toml
+        echo 'dbs-snapshot = { git = "https://github.com/loong64/dbs-snapshot", branch = "loong64-v1.5.2" }' >> Cargo.toml
+        docker run --rm -v ${{ github.workspace }}:/root/src rust-cross-compile-loong64:latest \
+        sh -c "cd /root/src && cargo update -p nix && make -e RUST_TARGET_STATIC=$RUST_TARGET static-release"
+    - name: Prepare to upload artifacts
+      run: |
+        declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu" ["loong64"]="loongarch64-unknown-linux-gnu")
         RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
-        rustup target add loongarch64-unknown-linux-gnu
-        cargo install --version 0.2.4 cross
-        make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
         sudo mv target/$RUST_TARGET/release/nydusd nydusd
         sudo mv target/$RUST_TARGET/release/nydus-image .
         sudo mv target/$RUST_TARGET/release/nydusctl .
@@ -54,17 +123,20 @@ jobs:
 
   contrib-linux:
     runs-on: ubuntu-latest
+    needs: check
+    if: needs.check.outputs.build == '1'
     strategy:
       matrix:
         arch: [loong64]
     env:
       DOCKER: false
+      version: ${{ needs.check.outputs.version }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
         repository: dragonflyoss/nydus
-        ref: ${{ github.event.inputs.tag }}
+        ref: ${{ env.version }}
     - name: Setup Golang
       uses: actions/setup-go@v5
       with:
@@ -87,11 +159,14 @@ jobs:
 
   prepare-tarball-linux:
     runs-on: ubuntu-latest
+    if: needs.check.outputs.build == '1'
     strategy:
       matrix:
         arch: [loong64]
         os: [linux]
-    needs: [nydus-linux, contrib-linux]
+    needs: [check, nydus-linux, contrib-linux]
+    env:
+      version: ${{ needs.check.outputs.version }}
     steps:
     - name: download artifacts
       uses: actions/download-artifact@v4
@@ -101,8 +176,7 @@ jobs:
         path: nydus-static
     - name: prepare release tarball
       run: |
-        tag=${{ github.event.inputs.tag }}
-        tarball="nydus-static-$tag-${{ matrix.os }}-${{ matrix.arch }}.tgz"
+        tarball="nydus-static-${{ env.version }}-${{ matrix.os }}-${{ matrix.arch }}.tgz"
         chmod +x nydus-static/*
         tar cf - nydus-static | gzip > ${tarball}
         echo "tarball=${tarball}" >> $GITHUB_ENV
@@ -120,16 +194,11 @@ jobs:
 
   create-release:
     runs-on: ubuntu-latest
-    needs: [prepare-tarball-linux]
+    if: needs.check.outputs.build == '1'
+    needs: [check, prepare-tarball-linux]
+    env:
+      version: ${{ needs.check.outputs.version }}
     steps:
-    - name: create tag
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git tag ${{ github.event.inputs.tag }}
-        git push origin ${{ github.event.inputs.tag }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: download artifacts
       uses: actions/download-artifact@v4
       with:
@@ -141,15 +210,12 @@ jobs:
         echo "tarballs<<EOF" >> $GITHUB_ENV
         for I in $(ls nydus-tarball);do echo "nydus-tarball/${I}" >> $GITHUB_ENV; done
         echo "EOF" >> $GITHUB_ENV
-        tag=${{ github.event.inputs.tag }}
-        echo "tag=${tag}" >> $GITHUB_ENV
         cat $GITHUB_ENV
     - name: push release
       uses: softprops/action-gh-release@v2
       with:
-        name: "Nydus Image Service ${{ env.tag }}"
-        body: |
-          **Full Changelog**: [${{ env.tag }}](https://github.com/dragonflyoss/nydus/releases/tag/${{ env.tag }})
+        name: "Nydus Image Service ${{ env.version }}"
+        tag_name: ${{ env.version }}
         generate_release_notes: true
         files: |
           ${{ env.tarballs }}
