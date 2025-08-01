@@ -6,12 +6,13 @@
 
 # Nydus: Dragonfly Container Image Service
 
-<p><img src="misc/logo.svg" width="170"></p>
+<p><img src="https://github.com/dragonflyoss/nydus/raw/refs/heads/master/misc/logo.svg" width="170"></p>
 
 [![Release Version](https://img.shields.io/github/v/release/dragonflyoss/nydus?style=flat)](https://github.com/dragonflyoss/nydus/releases)
 [![License](https://img.shields.io/crates/l/nydus-rs)](https://crates.io/crates/nydus-rs)
 [![Twitter](https://img.shields.io/twitter/url?style=social&url=https%3A%2F%2Ftwitter.com%2Fdragonfly_oss)](https://twitter.com/dragonfly_oss)
 [![Nydus Stars](https://img.shields.io/github/stars/dragonflyoss/nydus?label=Nydus%20Stars&style=social)](https://github.com/dragonflyoss/nydus)
+[<img src="https://app.devin.ai/devin_v4.png" width="20" title="deepwiki">](https://deepwiki.com/dragonflyoss/nydus)
 
 [![Smoke Test](https://github.com/dragonflyoss/nydus/actions/workflows/smoke.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/smoke.yml?query=event%3Aschedule)
 [![Image Conversion](https://github.com/dragonflyoss/nydus/actions/workflows/convert.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/convert.yml?query=event%3Aschedule)
@@ -24,7 +25,7 @@ Nydus implements a content-addressable file system on the RAFS format, which enh
 
 The following Benchmarking results demonstrate that Nydus images significantly outperform OCI images in terms of container cold startup elapsed time on Containerd, particularly as the OCI image size increases.
 
-![Container Cold Startup](./misc/perf.jpg)
+![Container Cold Startup](https://github.com/dragonflyoss/nydus/raw/refs/heads/master/misc/perf.jpg)
 
 ## Principles
 
@@ -154,6 +155,8 @@ Using the key features of nydus as native in your project without preparing and 
 
 Please visit [**Wiki**](https://github.com/dragonflyoss/nydus/wiki), or [**docs**](./docs)
 
+There is also a very nice [Devin](https://devin.ai/) generated document available at [**deepwiki**](https://deepwiki.com/dragonflyoss/nydus).
+
 ## Community
 
 Nydus aims to form a **vendor-neutral opensource** image distribution solution to all communities.
@@ -168,4 +171,4 @@ Feel free to reach us via Slack or Dingtalk.
 
 - **Dingtalk:** [34971767](https://qr.dingtalk.com/action/joingroup?code=v1,k1,ioWGzuDZEIO10Bf+/ohz4RcQqAkW0MtOwoG1nbbMxQg=&_dt_no_comment=1&origin=11)
 
-<img src="./misc/dingtalk.jpg" width="250" height="300"/>
+<img src="https://github.com/dragonflyoss/nydus/raw/refs/heads/master/misc/dingtalk.jpg" width="250" height="300"/>
