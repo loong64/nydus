@@ -15,7 +15,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     outputs:
       version: ${{ steps.get-version.outputs.version }}
       build: ${{ steps.check-build.outputs.build }}
@@ -44,7 +44,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   nydus-linux:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     needs: check
     if: needs.check.outputs.build == '1'
     strategy:
@@ -53,8 +53,7 @@ jobs:
     env:
       version: ${{ needs.check.outputs.version }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         repository: dragonflyoss/nydus
         ref: ${{ env.version }}
@@ -67,14 +66,7 @@ jobs:
     - name: Read Rust toolchain version
       id: set_toolchain_version
       run: |
-        if [ ! -f ".github/workflows/Dockerfile.cross" ]; then
-          wget -qO .github/workflows/Dockerfile.cross https://github.com/dragonflyoss/nydus/raw/refs/heads/master/.github/workflows/Dockerfile.cross
-        fi
-        if [ ! -f "rust-toolchain.toml" ]; then
-          RUST_TOOLCHAIN_VERSION="1.84.0"
-        else
-          RUST_TOOLCHAIN_VERSION=$(grep -oP '(?<=channel = ")[^"]*' rust-toolchain.toml)
-        fi
+        RUST_TOOLCHAIN_VERSION=$(grep -oP '(?<=channel = ")[^"]*' rust-toolchain.toml)
         echo "Rust toolchain version: $RUST_TOOLCHAIN_VERSION"
         echo "rust-version=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_OUTPUT
         sed -i 's@FROM ubuntu:latest@FROM debian:trixie@g' .github/workflows/Dockerfile.cross
@@ -82,7 +74,6 @@ jobs:
         sed -i 's@riscv64@loongarch64@g' .github/workflows/Dockerfile.cross
         sed -i 's@software-properties-common@# software-properties-common@g' .github/workflows/Dockerfile.cross
         sed -i 's@RUN add-apt-repository@RUN echo add-apt-repository@g' .github/workflows/Dockerfile.cross
-
       shell: bash
     - name: Set up Docker Buildx
       if: matrix.arch == 'loong64'
@@ -105,10 +96,10 @@ jobs:
       run: |
         RUST_TARGET=loongarch64-unknown-linux-gnu
         echo '[patch.crates-io]' >> Cargo.toml
-        echo 'nix = { git = "https://github.com/loong64/nix", branch = "loong64-v0.24.0" }' >> Cargo.toml
+        echo 'nix = { git = "https://github.com/loong64/nix", branch = "loong64-v0.24.3" }' >> Cargo.toml
         echo 'dbs-snapshot = { git = "https://github.com/loong64/dbs-snapshot", branch = "loong64-v1.5.2" }' >> Cargo.toml
         docker run --rm -v ${{ github.workspace }}:/root/src rust-cross-compile-loong64:latest \
-        sh -c "cd /root/src && cargo update -p nix && make -e RUST_TARGET_STATIC=$RUST_TARGET static-release"
+        sh -c "cd /root/src && cargo update -p nix@0.24.3 && make -e RUST_TARGET_STATIC=$RUST_TARGET static-release"
     - name: Prepare to upload artifacts
       run: |
         declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu" ["loong64"]="loongarch64-unknown-linux-gnu")
@@ -119,7 +110,7 @@ jobs:
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-artifacts-linux-${{ matrix.arch }}
         path: |
@@ -129,7 +120,7 @@ jobs:
           configs
 
   contrib-linux:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     needs: check
     if: needs.check.outputs.build == '1'
     strategy:
@@ -140,23 +131,22 @@ jobs:
       version: ${{ needs.check.outputs.version }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: dragonflyoss/nydus
         ref: ${{ env.version }}
     - name: Setup Golang
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
     - name: build contrib go components
       run: |
-        sed -i 's@golang:1.21@ghcr.io/loong64/golang:1.21@g' Makefile
         make -e GOARCH=${{ matrix.arch }} contrib-release
         sudo mv contrib/nydusify/cmd/nydusify .
         sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
     - name: store-artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-artifacts-linux-${{ matrix.arch }}-contrib
         path: |
@@ -165,7 +155,7 @@ jobs:
           containerd-nydus-grpc
 
   prepare-tarball-linux:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     if: needs.check.outputs.build == '1'
     strategy:
       matrix:
@@ -176,14 +166,15 @@ jobs:
       version: ${{ needs.check.outputs.version }}
     steps:
     - name: download artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         pattern: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}*
         merge-multiple: true
         path: nydus-static
     - name: prepare release tarball
       run: |
-        tarball="nydus-static-${{ env.version }}-${{ matrix.os }}-${{ matrix.arch }}.tgz"
+        tag=${{ env.version }}
+        tarball="nydus-static-$tag-${{ matrix.os }}-${{ matrix.arch }}.tgz"
         chmod +x nydus-static/*
         tar cf - nydus-static | gzip > ${tarball}
         echo "tarball=${tarball}" >> $GITHUB_ENV
@@ -192,7 +183,7 @@ jobs:
         sha256sum $tarball > $shasum
         echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
     - name: store-artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-release-tarball-${{ matrix.os }}-${{ matrix.arch }}
         path: |
@@ -200,14 +191,14 @@ jobs:
           ${{ env.tarball_shasum }}
 
   create-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     if: needs.check.outputs.build == '1'
     needs: [check, prepare-tarball-linux]
     env:
       version: ${{ needs.check.outputs.version }}
     steps:
     - name: download artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         pattern: nydus-release-tarball-*
         merge-multiple: true
