@@ -11,7 +11,8 @@ on:
     - cron: '0 20 * * *'
 
 env:
-  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FEATURES: cli,uffd,fanotify,fileio,dragonfly
 
 jobs:
   check:
@@ -43,177 +44,138 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  nydus-linux:
-    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     needs: check
     if: needs.check.outputs.build == '1'
+    env:
+      RELEASE_TAG: ${{ needs.check.outputs.version }}
     strategy:
+      fail-fast: false
       matrix:
-        arch: [loong64]
-    env:
-      version: ${{ needs.check.outputs.version }}
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - arch: loong64
+            runner: ubuntu-24.04
+            target: loongarch64-unknown-linux-musl
     steps:
-    - uses: actions/checkout@v6
-      with:
-        repository: dragonflyoss/nydus
-        ref: ${{ env.version }}
-    - name: Cache cargo
-      uses: Swatinem/rust-cache@v2
-      with:
-        cache-on-failure: true
-        shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
-    - uses: dsherret/rust-toolchain-file@v1
-    - name: Read Rust toolchain version
-      id: set_toolchain_version
-      run: |
-        RUST_TOOLCHAIN_VERSION=$(grep -oP '(?<=channel = ")[^"]*' rust-toolchain.toml)
-        echo "Rust toolchain version: $RUST_TOOLCHAIN_VERSION"
-        echo "rust-version=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_OUTPUT
-        sed -i 's@FROM ubuntu:latest@FROM debian:trixie@g' .github/workflows/Dockerfile.cross
-        sed -i 's@riscv64gc@loongarch64@g' .github/workflows/Dockerfile.cross
-        sed -i 's@riscv64@loongarch64@g' .github/workflows/Dockerfile.cross
-        sed -i 's@software-properties-common@# software-properties-common@g' .github/workflows/Dockerfile.cross
-        sed -i 's@RUN add-apt-repository@RUN echo add-apt-repository@g' .github/workflows/Dockerfile.cross
-      shell: bash
-    - name: Set up Docker Buildx
-      if: matrix.arch == 'loong64'
-      uses: docker/setup-buildx-action@v3
-    - name: Build and push Docker image
-      if: matrix.arch == 'loong64'
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: ./.github/workflows/Dockerfile.cross
-        push: false
-        load: true
-        tags: rust-cross-compile-loong64:latest
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-        build-args: |
-          RUST_VERSION=${{ steps.set_toolchain_version.outputs.rust-version }}
-    - name : Build Nydus-rs LoongArch
-      if: matrix.arch == 'loong64'
-      run: |
-        RUST_TARGET=loongarch64-unknown-linux-gnu
-        echo '[patch.crates-io]' >> Cargo.toml
-        echo 'nix = { git = "https://github.com/loong64/nix", branch = "loong64-v0.24.3" }' >> Cargo.toml
-        echo 'dbs-snapshot = { git = "https://github.com/loong64/dbs-snapshot", branch = "loong64-v1.5.2" }' >> Cargo.toml
-        docker run --rm -v ${{ github.workspace }}:/root/src rust-cross-compile-loong64:latest \
-        sh -c "cd /root/src && cargo update -p nix@0.24.3 && make -e RUST_TARGET_STATIC=$RUST_TARGET static-release"
-    - name: Prepare to upload artifacts
-      run: |
-        declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu" ["loong64"]="loongarch64-unknown-linux-gnu")
-        RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
-        sudo mv target/$RUST_TARGET/release/nydusd nydusd
-        sudo mv target/$RUST_TARGET/release/nydus-image .
-        sudo mv target/$RUST_TARGET/release/nydusctl .
-        sudo cp -r misc/configs .
-        sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
-    - name: store-artifacts
-      uses: actions/upload-artifact@v6
-      with:
-        name: nydus-artifacts-linux-${{ matrix.arch }}
-        path: |
-          nydusd
-          nydus-image
-          nydusctl
-          configs
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          repository: dragonflyoss/nydus
+          ref: ${{ env.RELEASE_TAG }}
 
-  contrib-linux:
-    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
-    needs: check
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: nydusify/go.mod
+          cache-dependency-path: nydusify/go.sum
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools musl-dev pkg-config perl make file
+
+      - name: Install LoongArch64 cross toolchain
+        if: matrix.arch == 'loong64'
+        run: |
+          sudo apt-get install -y qemu-user
+          curl --fail --location --retry 3 \
+            https://github.com/loong64/musl-cross-make/releases/download/20260507/loongarch64-linux-musl-cross.tgz \
+            | tar xz -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/loongarch64-linux-musl-cross/bin" >> "${GITHUB_PATH}"
+
+      - name: Build nydus
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CC_loongarch64_unknown_linux_musl: loongarch64-linux-musl-gcc
+          CARGO_TARGET_LOONGARCH64_UNKNOWN_LINUX_MUSL_LINKER: loongarch64-linux-musl-gcc
+        run: |
+          cargo build -p nydus --release \
+            --target ${{ matrix.target }} \
+            --features "${FEATURES}"
+
+      - name: Build nydusify
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          cd nydusify
+          go build -ldflags "-s -w" -o nydusify .
+
+      - name: Package release tarball
+        run: |
+          mkdir nydus-static
+          cp target/${{ matrix.target }}/release/nydus nydusify/nydusify config/registry.example.yaml nydus-static/
+          for bin in nydus-static/nydus nydus-static/nydusify; do
+            file "${bin}" | grep -Eq 'statically linked|static-pie linked'
+            if [ "${{ matrix.arch }}" != "loong64" ]; then
+              "./${bin}" --help > /dev/null
+            fi
+          done
+          tarball="nydus-static-${RELEASE_TAG}-linux-${{ matrix.arch }}.tgz"
+          tar cf - nydus-static | gzip > "${tarball}"
+          sha256sum "${tarball}" > "${tarball}.sha256sum"
+          echo "tarball=${tarball}" >> "${GITHUB_ENV}"
+
+      - name: Upload release tarball
+        uses: actions/upload-artifact@v6
+        with:
+          name: nydus-release-tarball-linux-${{ matrix.arch }}
+          path: |
+            ${{ env.tarball }}
+            ${{ env.tarball }}.sha256sum
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: needs.check.outputs.build == '1'
-    strategy:
-      matrix:
-        arch: [loong64]
     env:
-      DOCKER: false
-      version: ${{ needs.check.outputs.version }}
+      RELEASE_TAG: ${{ needs.check.outputs.version }}
+    permissions:
+      contents: write
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
-      with:
-        repository: dragonflyoss/nydus
-        ref: ${{ env.version }}
-    - name: Setup Golang
-      uses: actions/setup-go@v6
-      with:
-        go-version-file: 'go.work'
-        cache-dependency-path: "**/*.sum"
-    - name: build contrib go components
-      run: |
-        make -e GOARCH=${{ matrix.arch }} contrib-release
-        sudo mv contrib/nydusify/cmd/nydusify .
-        sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
-    - name: store-artifacts
-      uses: actions/upload-artifact@v6
-      with:
-        name: nydus-artifacts-linux-${{ matrix.arch }}-contrib
-        path: |
-          nydusify
-          nydus-overlayfs
-          containerd-nydus-grpc
+      - name: Download release tarballs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: nydus-release-tarball-*
+          merge-multiple: true
+          path: nydus-tarball
 
-  prepare-tarball-linux:
-    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
-    if: needs.check.outputs.build == '1'
-    strategy:
-      matrix:
-        arch: [loong64]
-        os: [linux]
-    needs: [check, nydus-linux, contrib-linux]
-    env:
-      version: ${{ needs.check.outputs.version }}
-    steps:
-    - name: download artifacts
-      uses: actions/download-artifact@v7
-      with:
-        pattern: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}*
-        merge-multiple: true
-        path: nydus-static
-    - name: prepare release tarball
-      run: |
-        tag=${{ env.version }}
-        tarball="nydus-static-$tag-${{ matrix.os }}-${{ matrix.arch }}.tgz"
-        chmod +x nydus-static/*
-        tar cf - nydus-static | gzip > ${tarball}
-        echo "tarball=${tarball}" >> $GITHUB_ENV
-
-        shasum="$tarball.sha256sum"
-        sha256sum $tarball > $shasum
-        echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
-    - name: store-artifacts
-      uses: actions/upload-artifact@v6
-      with:
-        name: nydus-release-tarball-${{ matrix.os }}-${{ matrix.arch }}
-        path: |
-          ${{ env.tarball }}
-          ${{ env.tarball_shasum }}
-
-  create-release:
-    runs-on: ubuntu-slim
-    if: needs.check.outputs.build == '1'
-    needs: [check, prepare-tarball-linux]
-    env:
-      version: ${{ needs.check.outputs.version }}
-    steps:
-    - name: download artifacts
-      uses: actions/download-artifact@v7
-      with:
-        pattern: nydus-release-tarball-*
-        merge-multiple: true
-        path: nydus-tarball
-    - name: prepare release env
-      run: |
-        echo "tarballs<<EOF" >> $GITHUB_ENV
-        for I in $(ls nydus-tarball);do echo "nydus-tarball/${I}" >> $GITHUB_ENV; done
-        echo "EOF" >> $GITHUB_ENV
-        cat $GITHUB_ENV
-    - name: push release
-      uses: softprops/action-gh-release@v2
-      with:
-        name: "Nydus Image Service ${{ env.version }}"
-        tag_name: ${{ env.version }}
-        generate_release_notes: true
-        files: |
-          ${{ env.tarballs }}
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Nydus ${{ env.RELEASE_TAG }}"
+          tag_name: ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          files: nydus-tarball/*
+          fail_on_unmatched_files: true
